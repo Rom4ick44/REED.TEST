@@ -37,9 +37,9 @@ MAIN_ROLE_ID = 1453817433352700067
 HIGH_ROLE_ID = 1453817148433502270
 
 # ------------------ ID категорий (портфели) ------------------
-ACADEMY_CATEGORY_ID = 1496264623924449346
-REED_CATEGORY_ID = 1496264623924449346
-MAIN_CATEGORY_ID = 1496264623924449346
+ACADEMY_CATEGORY_ID = 1496502020566417428
+REED_CATEGORY_ID = 1496501976983142540
+MAIN_CATEGORY_ID = 1496501921463144489
 HIGH_CATEGORY_ID = 1496264623924449346
 
 # ------------------ ID кастомных эмодзи ------------------
@@ -59,9 +59,9 @@ VOICE_CHANNEL_ID = 1472308376045228275
 
 ACTIVITY_CHECK_DAYS = 4          # период неактивности в днях
 ACTIVITY_CHECK_HOUR = 24         # интервал проверки в часах (например, 24 – раз в сутки)
-
+TIER_CHEACK = 1496261292900614244
 # Роли, имеющие доступ ко всем портфелям (высокие + лидеры)
-PORTFOLIO_ACCESS_ROLES = [HIGH_ROLE_ID, LEADER_ROLE_ID, DEPUTY_LEADER_ROLE_ID, ]
+PORTFOLIO_ACCESS_ROLES = [HIGH_ROLE_ID, LEADER_ROLE_ID, DEPUTY_LEADER_ROLE_ID, TIER_CHEACK ]
 
 # ---------- Каналы для мероприятий ----------
 EVENTS_CREATION_CHANNEL_ID = 1469692595260231894   # канал с кнопкой создания
@@ -129,3 +129,9 @@ PG_USER = os.getenv('PG_USER', 'postgres')
 PG_PASSWORD = os.getenv('PG_PASSWORD', '')
 
 
+# ------------------ Премии за контракты ------------------
+PREMIUM_REQUEST_CHANNEL_ID = 1495785003710287962   # канал с кнопкой подачи
+PREMIUM_REVIEW_CHANNEL_ID = 1495905182448353340    # канал для проверки заявок
+PREMIUM_LOG_CHANNEL_ID = 1495906716951248957       # канал для логов премий
+PREMIUM_REVIEWER_ROLE_ID = 1496547082448666848     # роль проверяющих
+PREMIUM_PAYOUT_ROLE_ID = 1471533152462704876       # роль ответственных за выплаты

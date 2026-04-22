@@ -10,7 +10,7 @@ from config import (
     ACADEMY_CATEGORY_ID, REED_CATEGORY_ID, MAIN_CATEGORY_ID, HIGH_CATEGORY_ID,
     PORTFOLIO_CREATION_CHANNEL_ID, PORTFOLIO_ACCESS_ROLES,
     CURATOR_ROLE_ID, GREEN_REQUESTS_CHANNEL_ID, GREEN_LOG_CHANNEL_ID,
-    EMOJI_ACADEMY, EMOJI_REED, EMOJI_MAIN, EMOJI_HIGH
+    EMOJI_ACADEMY, EMOJI_REED, EMOJI_MAIN, EMOJI_HIGH, ROLE_FAMQ
 )
 
 RANK_TO_CATEGORY = {
@@ -718,6 +718,75 @@ class Portfolio(commands.Cog):
         view = CreatePortfolioView(self.bot)
         await channel.send(embed=embed, view=view)
         await ctx.send("✅ Панель создания портфелей установлена.")
+
+
+# В файл cogs/portfolio.py добавить этот метод в класс Portfolio:
+
+    @commands.command(name='create_famq_portfolios')
+    @commands.has_permissions(administrator=True)
+    async def create_famq_portfolios(self, ctx):
+        """Создаёт портфели для всех участников с ролью FAMQ, у которых их нет."""
+        await ctx.send("🔄 Проверяю участников с ролью FAMQ и создаю недостающие портфели...")
+        
+        guild = ctx.guild
+        famq_role = guild.get_role(ROLE_FAMQ)
+        if not famq_role:
+            return await ctx.send("❌ Роль FAMQ не найдена. Проверьте ROLE_FAMQ в config.py")
+        
+        created = 0
+        skipped = 0
+        errors = 0
+        
+        for member in famq_role.members:
+            # Пропускаем ботов
+            if member.bot:
+                continue
+                
+            # Проверяем, есть ли уже портфель
+            existing = await db.get_portfolio_by_owner(member.id)
+            if existing:
+                skipped += 1
+                continue
+            
+            # Проверяем, есть ли у пользователя ранговая роль
+            rank = get_user_rank(member)
+            if not rank:
+                # Если нет ранга, но есть FAMQ – назначаем Academy
+                academy_role = guild.get_role(ACADEMY_ROLE_ID)
+                if academy_role:
+                    try:
+                        await member.add_roles(academy_role, reason="Автоматическое присвоение Academy для создания портфеля")
+                        rank = 'Academy'
+                    except Exception as e:
+                        print(f"❌ Не удалось выдать роль Academy участнику {member}: {e}")
+                        errors += 1
+                        continue
+                else:
+                    errors += 1
+                    continue
+            
+            # Создаём портфель
+            try:
+                channel = await create_portfolio_for_user(guild, member)
+                if channel:
+                    created += 1
+                else:
+                    errors += 1
+            except Exception as e:
+                print(f"❌ Ошибка при создании портфеля для {member}: {e}")
+                errors += 1
+            
+            # Небольшая задержка, чтобы не упереться в рейт-лимиты Discord API
+            await asyncio.sleep(1)
+        
+        # Итоговое сообщение
+        await ctx.send(
+            f"✅ **Готово!**\n"
+            f"📁 Создано портфелей: **{created}**\n"
+            f"⏭️ Пропущено (уже есть): **{skipped}**\n"
+            f"❌ Ошибок: **{errors}**"
+        )
+
 
 async def setup(bot):
     await bot.add_cog(Portfolio(bot))

@@ -247,6 +247,22 @@ async def init_db():
                 points INTEGER DEFAULT 0
             )
         ''')
+        # Таблица заявок на премию
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS premium_requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                contract_type TEXT NOT NULL,
+                screenshot_url TEXT,
+                status TEXT DEFAULT 'pending',
+                requested_at TIMESTAMP DEFAULT NOW(),
+                reviewed_by BIGINT,
+                reviewed_at TIMESTAMP,
+                amount INTEGER,
+                paid BOOLEAN DEFAULT FALSE,
+                paid_at TIMESTAMP
+            )
+        ''')
     
     print("✅ База данных PostgreSQL инициализирована")
 
@@ -685,3 +701,48 @@ async def get_invite_by_message(message_id: int):
 
 async def reset_leaderboard():
     await execute("DELETE FROM contest_leaderboard")
+
+# ---------- Премии ----------
+async def add_premium_request(user_id: int, contract_type: str, screenshot_url: str = None) -> int:
+    row = await fetch_one(
+        "INSERT INTO premium_requests (user_id, contract_type, screenshot_url) VALUES ($1, $2, $3) RETURNING id",
+        user_id, contract_type, screenshot_url
+    )
+    return row['id']
+
+async def get_premium_request(req_id: int):
+    return await fetch_one(
+        "SELECT id, user_id, contract_type, screenshot_url, status, amount, paid FROM premium_requests WHERE id = $1",
+        req_id
+    )
+
+async def update_premium_request_status(req_id: int, status: str, reviewer_id: int):
+    await execute(
+        "UPDATE premium_requests SET status = $1, reviewed_by = $2, reviewed_at = NOW() WHERE id = $3",
+        status, reviewer_id, req_id
+    )
+
+async def set_premium_amount(req_id: int, amount: int):
+    await execute("UPDATE premium_requests SET amount = $1 WHERE id = $2", amount, req_id)
+
+async def get_pending_premium_requests(limit: int = 50):
+    return await fetch_all(
+        "SELECT id, user_id, contract_type, screenshot_url, requested_at FROM premium_requests WHERE status = 'pending' ORDER BY requested_at ASC LIMIT $1",
+        limit
+    )
+
+async def get_approved_unpaid_requests():
+    return await fetch_all(
+        "SELECT user_id, amount FROM premium_requests WHERE status = 'approved' AND paid = FALSE"
+    )
+
+async def mark_premiums_as_paid(user_ids: list = None):
+    if user_ids:
+        await execute(
+            "UPDATE premium_requests SET paid = TRUE, paid_at = NOW() WHERE status = 'approved' AND paid = FALSE AND user_id = ANY($1)",
+            user_ids
+        )
+    else:
+        await execute(
+            "UPDATE premium_requests SET paid = TRUE, paid_at = NOW() WHERE status = 'approved' AND paid = FALSE"
+        )

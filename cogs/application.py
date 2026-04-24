@@ -46,6 +46,7 @@ async def send_to_channel(channel, embed=None, embeds=None):
 def create_past_apps_text(guild, user_id, past_apps):
     lines = []
     for app_id, status, date, msg_id in past_apps[:5]:
+        # Безопасное извлечение строки даты
         date_str = date if isinstance(date, str) else date.isoformat()[:10]
         if msg_id:
             jump_url = f"https://discord.com/channels/{guild.id}/{REQUEST_CHANNEL_ID}/{msg_id}"
@@ -226,8 +227,6 @@ class ApplicationButtons(View):
             await interaction.followup.send("❌ Роль обзвона не найдена.", ephemeral=True)
             return
 
-        reviewer = interaction.user  # сохраняем, кто вызвал
-
         async def background():
             if claimed_by is None:
                 await db.set_application_claimed(app_id, interaction.user.id)
@@ -286,16 +285,15 @@ class ApplicationButtons(View):
 
         await db.update_application_status(app_id, AppStatus.ACCEPTED.value, interaction.user.id)
 
-        # Засчитываем обзвон инвайтеру
-        inviter_role = interaction.guild.get_role(INVITER_ROLE_ID)
-        if inviter_role and inviter_role in interaction.user.roles:
+        # ===== Обзвон инвайтера =====
+        inviter_role_obj = interaction.guild.get_role(INVITER_ROLE_ID)
+        if inviter_role_obj and inviter_role_obj in interaction.user.roles:
             await db.update_inviter_calls(interaction.user.id, 'accept')
-
-            # Обновляем панель инвайтеров после обзвона
             inviter_cog = self.bot.get_cog('InviterSystem')
             if inviter_cog:
                 await inviter_cog.update_leaderboard()
 
+        # ===== Смена ника =====
         if answers_json:
             try:
                 answers = json.loads(answers_json)
@@ -305,12 +303,12 @@ class ApplicationButtons(View):
                     new_nick = f"{game_name} | {static}"
                     try:
                         await member.edit(nick=new_nick, reason="Смена ника после принятия заявки")
-                        print(f"✅ Ник {member} изменён на {new_nick}")
                     except Exception as e:
                         print(f"❌ Не удалось изменить ник {member}: {e}")
             except Exception as e:
                 print(f"Ошибка парсинга answers: {e}")
 
+        # ===== Автосоздание портфеля =====
         portfolio = await db.get_portfolio_by_owner(member.id)
         if not portfolio:
             try:
@@ -384,20 +382,13 @@ class RejectModal(Modal, title="Отклонение заявки"):
             try:
                 app_data = await db.get_application_by_message(self.message_id)
                 if not app_data:
-                    print("❌ Заявка не найдена в БД")
                     return
 
                 app_id, user_id, _, _, _, _, _, ping_id = app_data
                 member = guild.get_member(user_id)
                 if member:
                     try:
-                        embed = discord.Embed(
-                            title="❌ Заявка отклонена",
-                            description=f"Ваша заявка отклонена.\n**Причина:** {reason}",
-                            color=discord.Color.red()
-                        )
-                        embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-                        await member.send(embed=embed)
+                        await member.send(f"❌ Ваша заявка отклонена.\n**Причина:** {reason}")
                     except:
                         pass
                     role_ozon = guild.get_role(ROLE_OZON)
@@ -406,12 +397,10 @@ class RejectModal(Modal, title="Отклонение заявки"):
 
                 await db.update_application_status(app_id, AppStatus.REJECTED.value, reviewer.id)
 
-                # Засчитываем обзвон инвайтеру (отклонение тоже считается)
-                inviter_role = guild.get_role(INVITER_ROLE_ID)
-                if inviter_role and inviter_role in reviewer.roles:
+                # ===== Обзвон инвайтера =====
+                inviter_role_obj = guild.get_role(INVITER_ROLE_ID)
+                if inviter_role_obj and inviter_role_obj in reviewer.roles:
                     await db.update_inviter_calls(reviewer.id, 'reject')
-
-                    # Обновляем панель инвайтеров после обзвона
                     inviter_cog = self.bot.get_cog('InviterSystem')
                     if inviter_cog:
                         await inviter_cog.update_leaderboard()

@@ -239,7 +239,7 @@ class Premium(commands.Cog):
                         view = ReviewButtons(0, self.bot)
                         await message.edit(view=view)
 
-    @tasks.loop(time=time(23, 0))
+    @tasks.loop(time=time(21, 0))
     async def daily_summary(self):
         await self.bot.wait_until_ready()
         rows = await db.get_approved_unpaid_requests()

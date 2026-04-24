@@ -263,6 +263,30 @@ async def init_db():
                 paid_at TIMESTAMP
             )
         ''')
+
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS inviter_stats (
+                user_id BIGINT PRIMARY KEY,
+                daily_calls INTEGER DEFAULT 0,
+                weekly_calls INTEGER DEFAULT 0,
+                total_calls INTEGER DEFAULT 0,
+                daily_accepted INTEGER DEFAULT 0,
+                weekly_accepted INTEGER DEFAULT 0,
+                last_reset_daily DATE,
+                last_reset_weekly DATE
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS inviter_payments (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                amount INTEGER,
+                type TEXT,           -- 'accept' или 'weekly_bonus'
+                status TEXT DEFAULT 'unpaid',
+                created_at TIMESTAMP DEFAULT NOW(),
+                paid_at TIMESTAMP
+            )
+        ''')
     
     print("✅ База данных PostgreSQL инициализирована")
 
@@ -746,3 +770,128 @@ async def mark_premiums_as_paid(user_ids: list = None):
         await execute(
             "UPDATE premium_requests SET paid = TRUE, paid_at = NOW() WHERE status = 'approved' AND paid = FALSE"
         )
+
+import json
+from config import DEFAULT_SETTINGS
+
+settings_cache = {}
+
+async def load_all_settings():
+    """Загружает все настройки из БД в глобальный кэш."""
+    global settings_cache
+    rows = await fetch_all("SELECT key, value FROM settings")
+    for row in rows:
+        key = row['key']
+        value = row['value']
+        # Приведение типа на основе DEFAULT_SETTINGS
+        if key in DEFAULT_SETTINGS:
+            default_val = DEFAULT_SETTINGS[key]
+            if isinstance(default_val, bool):
+                value = value.lower() == 'true'
+            elif isinstance(default_val, int):
+                value = int(value)
+            elif isinstance(default_val, list):
+                value = json.loads(value)
+        settings_cache[key] = value
+    # Добавляем отсутствующие ключи из DEFAULT_SETTINGS
+    for key, default_val in DEFAULT_SETTINGS.items():
+        if key not in settings_cache:
+            settings_cache[key] = default_val
+
+def get_setting(key, default=None):
+    return settings_cache.get(key, default)
+
+async def set_setting(key: str, value):
+    """Сохраняет настройку в БД и обновляет кэш."""
+    # Преобразуем значение в строку
+    if isinstance(value, bool):
+        str_value = 'true' if value else 'false'
+    elif isinstance(value, list) or isinstance(value, dict):
+        str_value = json.dumps(value, ensure_ascii=False)
+    else:
+        str_value = str(value)
+    await execute(
+        "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        key, str_value
+    )
+    # Обновляем кэш с приведением типа
+    if key in DEFAULT_SETTINGS:
+        default_val = DEFAULT_SETTINGS[key]
+        if isinstance(default_val, bool):
+            value = str_value.lower() == 'true'
+        elif isinstance(default_val, int):
+            value = int(str_value)
+        elif isinstance(default_val, list):
+            value = json.loads(str_value)
+    settings_cache[key] = value
+
+async def reset_setting(key: str):
+    """Сбрасывает настройку к значению по умолчанию из config."""
+    await execute("DELETE FROM settings WHERE key = $1", key)
+    if key in DEFAULT_SETTINGS:
+        settings_cache[key] = DEFAULT_SETTINGS[key]
+    elif key in settings_cache:
+        del settings_cache[key]
+
+async def init_settings():
+    """Заполняет таблицу settings значениями по умолчанию, если они отсутствуют."""
+    for key, default_val in DEFAULT_SETTINGS.items():
+        # Преобразуем в строку
+        if isinstance(default_val, bool):
+            str_val = 'true' if default_val else 'false'
+        elif isinstance(default_val, list) or isinstance(default_val, dict):
+            str_val = json.dumps(default_val, ensure_ascii=False)
+        else:
+            str_val = str(default_val)
+        await execute(
+            "INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
+            key, str_val
+        )
+
+
+async def update_inviter_calls(user_id: int, action: str):
+    """Увеличивает счётчики обзвонов (accept/reject)."""
+    today = datetime.now().date()
+    # Убедимся, что запись существует
+    await execute('''
+        INSERT INTO inviter_stats (user_id, daily_calls, weekly_calls, total_calls, daily_accepted, last_reset_daily, last_reset_weekly)
+        VALUES ($1, 0, 0, 0, 0, $2, $2)
+        ON CONFLICT (user_id) DO NOTHING
+    ''', user_id, today)
+    if action == 'accept':
+        await execute('UPDATE inviter_stats SET daily_calls = daily_calls + 1, weekly_calls = weekly_calls + 1, total_calls = total_calls + 1, daily_accepted = daily_accepted + 1, weekly_accepted = COALESCE(weekly_accepted,0) + 1 WHERE user_id = $1', user_id)
+    else:  # reject
+        await execute('UPDATE inviter_stats SET daily_calls = daily_calls + 1, weekly_calls = weekly_calls + 1, total_calls = total_calls + 1 WHERE user_id = $1', user_id)
+
+async def get_inviter_stats(user_id: int):
+    return await fetch_one('SELECT * FROM inviter_stats WHERE user_id = $1', user_id)
+
+async def get_inviter_leaderboard_daily(limit=10):
+    return await fetch_all('SELECT user_id, daily_calls, daily_accepted FROM inviter_stats ORDER BY daily_calls DESC LIMIT $1', limit)
+
+async def get_inviter_leaderboard_weekly(limit=10):
+    return await fetch_all('SELECT user_id, weekly_calls FROM inviter_stats ORDER BY weekly_calls DESC LIMIT $1', limit)
+
+async def get_inviter_leaderboard_total(limit=10):
+    return await fetch_all('SELECT user_id, total_calls FROM inviter_stats ORDER BY total_calls DESC LIMIT $1', limit)
+
+async def get_daily_payment_list():
+    """Возвращает список (user_id, daily_calls) для всех, у кого daily_calls > 0."""
+    return await fetch_all('SELECT user_id, daily_calls FROM inviter_stats WHERE daily_calls > 0')
+
+async def add_inviter_payment(user_id: int, amount: int, pay_type: str):
+    await execute('INSERT INTO inviter_payments (user_id, amount, type, status) VALUES ($1, $2, $3, \'unpaid\')', user_id, amount, pay_type)
+
+async def mark_daily_payments_paid():
+    """Помечает все unpaid платежи за сегодня как paid."""
+    await execute('UPDATE inviter_payments SET status = \'paid\', paid_at = NOW() WHERE status = \'unpaid\' AND date_trunc(\'day\', created_at) = CURRENT_DATE')
+
+async def reset_daily_stats():
+    await execute('UPDATE inviter_stats SET daily_calls = 0, daily_accepted = 0, last_reset_daily = CURRENT_DATE WHERE last_reset_daily IS NULL OR last_reset_daily < CURRENT_DATE')
+
+async def reset_weekly_stats():
+    await execute('UPDATE inviter_stats SET weekly_calls = 0, weekly_accepted = 0, last_reset_weekly = CURRENT_DATE WHERE last_reset_weekly IS NULL OR last_reset_weekly < CURRENT_DATE - INTERVAL \'7 days\'')
+
+async def reset_daily_accepted():
+    """Обнуляет daily_accepted и daily_calls у всех инвайтеров (после выплаты)."""
+    await execute('UPDATE inviter_stats SET daily_accepted = 0, daily_calls = 0 WHERE daily_accepted > 0 OR daily_calls > 0')

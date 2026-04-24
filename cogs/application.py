@@ -46,6 +46,7 @@ async def send_to_channel(channel, embed=None, embeds=None):
 def create_past_apps_text(guild, user_id, past_apps):
     lines = []
     for app_id, status, date, msg_id in past_apps[:5]:
+        date_str = date if isinstance(date, str) else date.isoformat()[:10]
         if msg_id:
             jump_url = f"https://discord.com/channels/{guild.id}/{REQUEST_CHANNEL_ID}/{msg_id}"
             if status == AppStatus.ACCEPTED.value:
@@ -54,9 +55,9 @@ def create_past_apps_text(guild, user_id, past_apps):
                 emoji = f"<:reject:{EMOJI_REJECT}>"
             else:
                 emoji = "⏳"
-            line = f"• [#{app_id}]({jump_url}) – {date[:10]} – {status.capitalize()} {emoji}"
+            line = f"• [#{app_id}]({jump_url}) – {date_str} – {status.capitalize()} {emoji}"
         else:
-            line = f"• #{app_id} – {date[:10]} – {status.capitalize()}"
+            line = f"• #{app_id} – {date_str} – {status.capitalize()}"
         lines.append(line)
     text = "\n".join(lines)
     if not text:
@@ -94,10 +95,8 @@ class ApplicationModal(Modal, title="Заявка на вступление"):
         user = interaction.user
         member = guild.get_member(user.id)
 
-        # Получаем прошлые заявки для отображения
         past_apps = await db.get_user_applications(user.id)
 
-        # Embed 1
         embed1 = discord.Embed(title="📋 НОВАЯ ЗАЯВКА В СЕМЬЮ", color=discord.Color.light_gray())
         embed1.set_thumbnail(url=member.display_avatar.url)
         recent_warning = " ⚠️ (менее месяца)" if is_account_recent(user.created_at) else ""
@@ -117,7 +116,6 @@ class ApplicationModal(Modal, title="Заявка на вступление"):
         embed1.add_field(name="**СТАТУС ЗАЯВКИ**", value="⏳ Ожидает рассмотрения", inline=False)
         embed1.add_field(name="**РЕЗУЛЬТАТ РАССМОТРЕНИЯ**", value="—", inline=False)
 
-        # Embed 2
         embed2 = discord.Embed(title="**ОТВЕТЫ НА ВОПРОСЫ**", color=0x2F3136)
         for i, (q, ans) in enumerate(zip(QUESTIONS, answers)):
             embed2.add_field(name=f"{i+1}. {q}", value=f"```{ans}```", inline=False)
@@ -154,7 +152,6 @@ class ApplicationButtons(View):
 
     def get_application_data(self, interaction: discord.Interaction):
         message_id = interaction.message.id
-        # Возвращаем корутину, которая будет awaited в вызывающем коде
         return db.get_application_by_message(message_id), interaction.message
 
     def can_interact(self, interaction: discord.Interaction, app_data):
@@ -229,6 +226,8 @@ class ApplicationButtons(View):
             await interaction.followup.send("❌ Роль обзвона не найдена.", ephemeral=True)
             return
 
+        reviewer = interaction.user  # сохраняем, кто вызвал
+
         async def background():
             if claimed_by is None:
                 await db.set_application_claimed(app_id, interaction.user.id)
@@ -287,13 +286,22 @@ class ApplicationButtons(View):
 
         await db.update_application_status(app_id, AppStatus.ACCEPTED.value, interaction.user.id)
 
-        # ===== АВТОМАТИЧЕСКАЯ СМЕНА НИКА =====
+        # Засчитываем обзвон инвайтеру
+        inviter_role = interaction.guild.get_role(INVITER_ROLE_ID)
+        if inviter_role and inviter_role in interaction.user.roles:
+            await db.update_inviter_calls(interaction.user.id, 'accept')
+
+            # Обновляем панель инвайтеров после обзвона
+            inviter_cog = self.bot.get_cog('InviterSystem')
+            if inviter_cog:
+                await inviter_cog.update_leaderboard()
+
         if answers_json:
             try:
                 answers = json.loads(answers_json)
                 if len(answers) >= 3:
-                    game_name = answers[0]      # Имя в игре
-                    static = answers[2]          # Статик
+                    game_name = answers[0]
+                    static = answers[2]
                     new_nick = f"{game_name} | {static}"
                     try:
                         await member.edit(nick=new_nick, reason="Смена ника после принятия заявки")
@@ -302,9 +310,7 @@ class ApplicationButtons(View):
                         print(f"❌ Не удалось изменить ник {member}: {e}")
             except Exception as e:
                 print(f"Ошибка парсинга answers: {e}")
-        # =====================================
 
-        # Автосоздание портфеля
         portfolio = await db.get_portfolio_by_owner(member.id)
         if not portfolio:
             try:
@@ -371,6 +377,9 @@ class RejectModal(Modal, title="Отклонение заявки"):
         reason = self.children[0].value
         await interaction.response.send_message("✅ Заявка отклоняется...", ephemeral=True)
 
+        reviewer = interaction.user
+        guild = interaction.guild
+
         async def background():
             try:
                 app_data = await db.get_application_by_message(self.message_id)
@@ -379,7 +388,7 @@ class RejectModal(Modal, title="Отклонение заявки"):
                     return
 
                 app_id, user_id, _, _, _, _, _, ping_id = app_data
-                member = interaction.guild.get_member(user_id)
+                member = guild.get_member(user_id)
                 if member:
                     try:
                         embed = discord.Embed(
@@ -387,15 +396,25 @@ class RejectModal(Modal, title="Отклонение заявки"):
                             description=f"Ваша заявка отклонена.\n**Причина:** {reason}",
                             color=discord.Color.red()
                         )
-                        embed.set_thumbnail(url=interaction.guild.icon.url if interaction.guild.icon else None)
+                        embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
                         await member.send(embed=embed)
                     except:
                         pass
-                    role_ozon = interaction.guild.get_role(ROLE_OZON)
+                    role_ozon = guild.get_role(ROLE_OZON)
                     if role_ozon and role_ozon in member.roles:
                         await member.remove_roles(role_ozon)
 
-                await db.update_application_status(app_id, AppStatus.REJECTED.value, interaction.user.id)
+                await db.update_application_status(app_id, AppStatus.REJECTED.value, reviewer.id)
+
+                # Засчитываем обзвон инвайтеру (отклонение тоже считается)
+                inviter_role = guild.get_role(INVITER_ROLE_ID)
+                if inviter_role and inviter_role in reviewer.roles:
+                    await db.update_inviter_calls(reviewer.id, 'reject')
+
+                    # Обновляем панель инвайтеров после обзвона
+                    inviter_cog = self.bot.get_cog('InviterSystem')
+                    if inviter_cog:
+                        await inviter_cog.update_leaderboard()
 
                 rejected_channel = self.bot.get_channel(REJECTED_CHANNEL_ID)
                 if rejected_channel:
@@ -405,7 +424,7 @@ class RejectModal(Modal, title="Отклонение заявки"):
                         e2 = discord.Embed.from_dict(msg.embeds[1].to_dict())
                         e1._fields = [f for f in e1._fields if f['name'] != "**РЕЗУЛЬТАТ РАССМОТРЕНИЯ**"]
                         now = datetime.now().strftime("%d.%m.%Y в %H:%M")
-                        result_value = f"**Рассмотрено:** {interaction.user.mention}\n**Дата:** {now}\n**Статус:** ❌ Отклонена\n**Причина:** {reason}"
+                        result_value = f"**Рассмотрено:** {reviewer.mention}\n**Дата:** {now}\n**Статус:** ❌ Отклонена\n**Причина:** {reason}"
                         e1.add_field(name="**РЕЗУЛЬТАТ РАССМОТРЕНИЯ**", value=result_value, inline=False)
                         await send_to_channel(rejected_channel, embeds=[e1, e2])
                     except Exception as e:
@@ -446,7 +465,6 @@ class ApplyButtonView(View):
 class Application(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # db.init_db() удалён, т.к. вызывается в bot.py
         self.bot.add_view(ApplicationButtons(self.bot))
         self.bot.add_view(ApplyButtonView(self.bot))
         print("✅ Persistent view для заявок зарегистрированы")

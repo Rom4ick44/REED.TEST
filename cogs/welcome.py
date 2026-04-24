@@ -26,13 +26,11 @@ class Welcome(commands.Cog):
             return "Нет"
         lines = []
         for app_id, status, date, msg_id in past_apps[:5]:
-            # Приводим дату к строке, если это datetime
-            date_str = date if isinstance(date, str) else date.isoformat()[:10]
             if msg_id:
                 jump_url = f"https://discord.com/channels/{guild.id}/{REQUEST_CHANNEL_ID}/{msg_id}"
-                lines.append(f"[#{app_id} - {status}]({jump_url}) ({date_str})")
+                lines.append(f"[#{app_id} - {status}]({jump_url}) ({date[:10]})")
             else:
-                lines.append(f"#{app_id} - {status} ({date_str})")
+                lines.append(f"#{app_id} - {status} ({date[:10]})")
         return "\n".join(lines)
 
     @commands.Cog.listener()

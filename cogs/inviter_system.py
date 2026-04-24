@@ -1,14 +1,49 @@
 import discord
 from discord.ext import commands, tasks
+from discord import ui
 from datetime import datetime, time, date, timedelta
-from discord.ui import View, Button
 import asyncio
 import database as db
-from config import INVITER_LEADERBOARD_CHANNEL_ID, INVITER_ROLE_ID
+from config import INVITER_LEADERBOARD_CHANNEL_ID, INVITER_ROLE_ID, LEADER_ROLE_ID
 
 PAY_PER_ACCEPT = 15000
 WEEKLY_BONUS = 10000
 
+# -------------------- Макет панели (Components V2, стабильная версия) --------------------
+class InviterLayout(ui.LayoutView):
+    def __init__(self, today_text, week_text, total_text):
+        super().__init__()
+
+        container = ui.Container(accent_color=0x2F3136, spoiler=False)
+
+        # Заголовок
+        container.add_item(ui.TextDisplay("## 📊 Панель инвайтеров"))
+
+        # Разделитель и секция "Сегодня"
+        container.add_item(ui.Separator())
+        container.add_item(ui.TextDisplay(today_text))
+
+        # Разделитель и секция "Неделя"
+        container.add_item(ui.Separator())
+        container.add_item(ui.TextDisplay(week_text))
+
+        # Разделитель и секция "Всего"
+        container.add_item(ui.Separator())
+        container.add_item(ui.TextDisplay(total_text))
+
+        self.add_item(container)
+
+        # Кнопка для обновления (чтобы сообщение не считалось пустым)
+        @ui.button(label="Обновить", style=discord.ButtonStyle.secondary, custom_id="inviter_refresh")
+        async def refresh_btn(self, interaction: discord.Interaction, button: ui.Button):
+            cog = interaction.client.get_cog('InviterSystem')
+            if cog:
+                await cog.update_leaderboard()
+                await interaction.response.defer()
+            else:
+                await interaction.response.send_message("❌ Ошибка обновления.", ephemeral=True)
+
+# -------------------- Основной ког --------------------
 class InviterSystem(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -30,6 +65,16 @@ class InviterSystem(commands.Cog):
     def get_guild(self):
         return self.bot.guilds[0] if self.bot.guilds else None
 
+    def _get_member_name(self, uid):
+        """Возвращает никнейм или упоминание."""
+        guild = self.get_guild()
+        if guild:
+            member = guild.get_member(uid)
+            if member:
+                return member.display_name
+        return f"<@{uid}>"
+
+    # -------------------- Обновление панели --------------------
     async def update_leaderboard(self):
         channel = self.bot.get_channel(self.leaderboard_channel_id)
         if not channel:
@@ -38,100 +83,77 @@ class InviterSystem(commands.Cog):
         daily = await db.get_inviter_leaderboard_daily()
         weekly = await db.get_inviter_leaderboard_weekly()
         total = await db.get_inviter_leaderboard_total()
-        payments = await db.get_daily_payment_list()
 
-        embed_daily = self.format_leaderboard_embed(daily, "📊 Топ обзвонов за сегодня", "daily_calls")
-        embed_weekly = self.format_leaderboard_embed(weekly, "📅 Топ обзвонов за неделю", "weekly_calls")
-        embed_total = self.format_leaderboard_embed(total, "🏆 Общий топ обзвонов", "total_calls")
-        embed_pay = self.format_payment_embed(payments)
+        def format_section(rows, field, title):
+            """Форматирует текст для секции."""
+            lines = [f"### {title}"]
+            if not rows:
+                lines.append("Нет данных")
+            else:
+                for i, row in enumerate(rows, 1):
+                    uid = row['user_id']
+                    name = self._get_member_name(uid)
+                    lines.append(f"{i}. {name} – {row[field]} обзв.")
+            return "\n".join(lines)
 
-        messages = []
-        async for msg in channel.history(limit=10):
-            if msg.author == self.bot.user and msg.embeds:
-                messages.append(msg)
+        today_text = format_section(daily, "daily_calls", "Сегодня")
+        week_text = format_section(weekly, "weekly_calls", "Неделя")
+        total_text = format_section(total, "total_calls", "Всего")
 
-        daily_msg = None
-        weekly_msg = None
-        total_msg = None
-        pay_msg = None
+        layout = InviterLayout(today_text, week_text, total_text)
 
-        for msg in messages:
-            title = msg.embeds[0].title
-            if "Топ обзвонов за сегодня" in title:
-                daily_msg = msg
-            elif "Топ обзвонов за неделю" in title:
-                weekly_msg = msg
-            elif "Общий топ обзвонов" in title:
-                total_msg = msg
-            elif "Выплаты инвайтерам за сегодня" in title:
-                pay_msg = msg
+        # Удаляем предыдущее сообщение бота (чтобы панель всегда была актуальной)
+        try:
+            async for msg in channel.history(limit=5):
+                if msg.author == self.bot.user:
+                    await msg.delete()
+                    break
+        except discord.HTTPException:
+            pass
 
-        if daily_msg:
-            await daily_msg.edit(embed=embed_daily)
-        else:
-            await channel.send(embed=embed_daily)
+        # Отправляем новое сообщение с макетом
+        await channel.send(view=layout)
 
-        if weekly_msg:
-            await weekly_msg.edit(embed=embed_weekly)
-        else:
-            await channel.send(embed=embed_weekly)
-
-        if total_msg:
-            await total_msg.edit(embed=embed_total)
-        else:
-            await channel.send(embed=embed_total)
-
-        view = PaymentView(self.bot)
-        if pay_msg:
-            await pay_msg.edit(embed=embed_pay, view=view)
-        else:
-            await channel.send(embed=embed_pay, view=view)
-
-    def format_leaderboard_embed(self, rows, title, field):
-        embed = discord.Embed(title=title, color=0x2F3136)
-        if not rows:
-            embed.description = "Нет данных"
-            return embed
+    # -------------------- Выплаты лидерам --------------------
+    async def send_daily_payments_to_leaders(self):
         guild = self.get_guild()
-        for i, row in enumerate(rows, 1):
-            user_id = row['user_id']
-            name = f"<@{user_id}>"
-            if guild:
-                member = guild.get_member(user_id)
-                if member:
-                    name = member.display_name
-            embed.add_field(name=f"{i}. {name}", value=f"Обзвонов: {row[field]}", inline=False)
-        return embed
+        if not guild:
+            return
+        leader_role = guild.get_role(LEADER_ROLE_ID)
+        if not leader_role:
+            return
 
-    def format_payment_embed(self, payments):
-        embed = discord.Embed(title="💰 Выплаты инвайтерам за сегодня", color=discord.Color.gold())
+        payments = await db.get_daily_payment_list()
         if not payments:
-            embed.description = "Нет обзвонов"
-            return embed
+            return
+
+        embed = discord.Embed(title="💰 Ежедневные выплаты инвайтерам", color=discord.Color.gold())
         total = 0
         desc = ""
-        guild = self.get_guild()
         for uid, calls in payments:
-            user_id = uid
-            name = f"<@{user_id}>"
-            if guild:
-                member = guild.get_member(user_id)
-                if member:
-                    name = member.display_name
+            name = self._get_member_name(uid)
             amount = calls * PAY_PER_ACCEPT
             total += amount
             desc += f"{name}: {calls} обзвонов → {amount} 💵\n"
         embed.description = desc
         embed.set_footer(text=f"Общая сумма: {total} 💵")
-        return embed
 
+        for member in leader_role.members:
+            try:
+                await member.send(embed=embed)
+            except:
+                pass
+
+    # -------------------- Авто‑сбросы --------------------
     @tasks.loop(time=time(21, 0))
     async def daily_reset(self):
         await self.bot.wait_until_ready()
         today = date.today()
+        await self.send_daily_payments_to_leaders()
+        await db.reset_daily_stats()
         if today.weekday() == 6:
             await self.award_weekly_bonus()
-        await db.reset_daily_stats()
+            await db.reset_weekly_stats()
         await self.update_leaderboard()
         print("🔁 Ежедневный сброс и обновление панели инвайтеров.")
 
@@ -152,7 +174,6 @@ class InviterSystem(commands.Cog):
         bonus_each = WEEKLY_BONUS // len(winners)
         for winner in winners:
             await db.add_inviter_payment(winner['user_id'], bonus_each, 'weekly_bonus')
-        guild = self.get_guild()
         for winner in winners:
             user = self.bot.get_user(winner['user_id'])
             if user:
@@ -161,13 +182,14 @@ class InviterSystem(commands.Cog):
                 except:
                     pass
 
+    # -------------------- Команды --------------------
     @commands.command(name='inviter_stats')
     async def inviter_stats(self, ctx, member: discord.Member = None):
         if member is None:
             member = ctx.author
         stats = await db.get_inviter_stats(member.id)
         if not stats:
-            return await ctx.send("📭 У этого пользователя ещё нет статистики обзвонов.")
+            return await ctx.send("📭 Статистика отсутствует.")
         embed = discord.Embed(title=f"Статистика обзвонов: {member.display_name}", color=0x2F3136)
         embed.add_field(name="Сегодня", value=f"Обзвонов: {stats['daily_calls']} | Принято: {stats['daily_accepted']}")
         embed.add_field(name="Неделя", value=f"Обзвонов: {stats['weekly_calls']}")
@@ -179,7 +201,7 @@ class InviterSystem(commands.Cog):
     async def setup_inviter_leaderboard(self, ctx):
         self.leaderboard_channel_id = ctx.channel.id
         await db.set_setting('INVITER_LEADERBOARD_CHANNEL_ID', str(ctx.channel.id))
-        await ctx.send("✅ Канал для панели инвайтеров установлен.")
+        await ctx.send("✅ Канал установлен.")
         await self.update_leaderboard()
 
     @commands.command(name='update_inviter_board')
@@ -187,28 +209,6 @@ class InviterSystem(commands.Cog):
     async def update_inviter_board(self, ctx):
         await self.update_leaderboard()
         await ctx.send("✅ Панель обновлена.")
-
-
-class PaymentView(View):
-    def __init__(self, bot):
-        super().__init__(timeout=None)
-        self.bot = bot
-
-    @discord.ui.button(label="✅ Выплачено", style=discord.ButtonStyle.success, custom_id="inviter_pay_done")
-    async def pay_done(self, interaction: discord.Interaction, button: Button):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("❌ Недостаточно прав.", ephemeral=True)
-
-        # Обнуляем дневные счётчики всех инвайтеров
-        await db.reset_daily_stats()
-        await db.mark_daily_payments_paid()
-
-        # Обновляем панель
-        cog = self.bot.get_cog('InviterSystem')
-        if cog:
-            await cog.update_leaderboard()
-
-        await interaction.response.send_message("✅ Ежедневные выплаты обнулены.", ephemeral=True)
 
 
 async def setup(bot):
